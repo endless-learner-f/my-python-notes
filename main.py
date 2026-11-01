@@ -1,3 +1,4 @@
+from fastapi.responses import HTMLResponse
 import os
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -101,3 +102,55 @@ def chat_with_ai(request: ChatRequest):
         return {"reply": ai_reply}
     else:
         return {"状态码": response.status_code, "化验单": response.text}
+@app.get("/chat_ui", response_class=HTMLResponse)
+def chat_ui():
+    # 这里用三个引号包住了一大段 HTML 和 JavaScript 代码
+    html_content = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>我的专属 AI 助手</title>
+        <style>
+            body { font-family: sans-serif; max-width: 500px; margin: 50px auto; background: #f0f2f5; }
+            #chat-box { background: white; padding: 20px; border-radius: 10px; height: 400px; overflow-y: scroll; margin-bottom: 10px; }
+            .user-msg { text-align: right; color: blue; margin: 10px 0; }
+            .ai-msg { text-align: left; color: green; margin: 10px 0; }
+            input { width: 80%; padding: 10px; }
+            button { padding: 10px; cursor: pointer; }
+        </style>
+    </head>
+    <body>
+        <h2>我的专属 AI 助手</h2>
+        <div id="chat-box"></div>
+        <input type="text" id="msg-input" placeholder="输入你想说的话...">
+        <button onclick="sendMessage()">发送</button>
+
+        <script>
+            async function sendMessage() {
+                const input = document.getElementById("msg-input");
+                const chatBox = document.getElementById("chat-box");
+                const msg = input.value;
+                if (!msg) return;
+
+                // 1. 把我说的话显示在屏幕上
+                chatBox.innerHTML += `<div class="user-msg">我: ${msg}</div>`;
+                input.value = ""; // 清空输入框
+                chatBox.scrollTop = chatBox.scrollHeight;
+
+                // 2. 发送给咱们的后端（FastAPI的 /chat 接口）
+                const response = await fetch("/chat", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ message: msg })
+                });
+
+                // 3. 拿到 AI 的回复并显示
+                const data = await response.json();
+                chatBox.innerHTML += `<div class="ai-msg">AI: ${data.reply}</div>`;
+                chatBox.scrollTop = chatBox.scrollHeight;
+            }
+        </script>
+    </body>
+    </html>
+    """
+    return html_content
