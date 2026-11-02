@@ -7,6 +7,17 @@ from pydantic import BaseModel
 import requests
 load_dotenv()
 app = FastAPI()
+init_conn  = sqlite3.connect("school.db")
+init_cursor = init_conn.cursor()
+init_cursor.execute("""
+    CREATE TABLE IF NOT EXISTS chat_logs(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_msg TEXT,
+        ai_msg TEXT
+    )
+""")
+init_conn.commit()
+init_conn.close()
 @app.get("/")
 def  read_root():
     return{"message":"测试成功"}
@@ -81,6 +92,7 @@ def get_one_student(student_id: int):
     return {"id": row[0], "name": row[1], "age": row[2]}
 class ChatRequest(BaseModel):
     message: str
+    history: list = []
 @app.post("/chat")
 def chat_with_ai(request: ChatRequest):
     api_key = os.getenv("DEEPSEEK_API_KEY")
@@ -89,22 +101,29 @@ def chat_with_ai(request: ChatRequest):
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
+    messages = [
+        {"role": "system", "content": "你现在是个极其严厉的AI编程教练。说话一针见血，绝不废话。如果用户问低级问题，直接嘲讽他，然后再告诉他正确答案。"}
+    ]
+    messages.extend(request.history)
+    messages.append({"role": "user", "content": request.message})
     data = {
         "model": "deepseek-chat",
-        "messages": [
-            {"role": "user", "content": request.message}
-        ]
+        "messages": messages
     }
     response = requests.post(url, headers=headers, json=data)
     if response.status_code == 200:
         result = response.json()
         ai_reply = result["choices"][0]["message"]["content"]
+        conn = sqlite3.connect("school.db")
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO chat_logs (user_msg, ai_msg) VALUES (?,?)", (request.message, ai_reply))
+        conn.commit()
+        conn.close()
         return {"reply": ai_reply}
     else:
         return {"状态码": response.status_code, "化验单": response.text}
 @app.get("/chat_ui", response_class=HTMLResponse)
 def chat_ui():
-    # 这里用三个引号包住了一大段 HTML 和 JavaScript 代码
     html_content = """
     <!DOCTYPE html>
     <html>
@@ -126,29 +145,42 @@ def chat_ui():
         <button onclick="sendMessage()">发送</button>
 
         <script>
-            async function sendMessage() {
-                const input = document.getElementById("msg-input");
-                const chatBox = document.getElementById("chat-box");
-                const msg = input.value;
-                if (!msg) return;
+                    // 1. 在函数最外面建一个全局数组，用来存历史记录
+        let chatHistory = [];
 
-                // 1. 把我说的话显示在屏幕上
-                chatBox.innerHTML += `<div class="user-msg">我: ${msg}</div>`;
-                input.value = ""; // 清空输入框
-                chatBox.scrollTop = chatBox.scrollHeight;
+        async function sendMessage() {
+            const input = document.getElementById("msg-input");
+            const chatBox = document.getElementById("chat-box");
+            const msg = input.value;
+            if (!msg) return;
 
-                // 2. 发送给咱们的后端（FastAPI的 /chat 接口）
-                const response = await fetch("/chat", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ message: msg })
-                });
+            // 2. 把你说的话，先装进历史记录里
+            chatHistory.push({"role": "user", "content": msg});
 
-                // 3. 拿到 AI 的回复并显示
-                const data = await response.json();
-                chatBox.innerHTML += `<div class="ai-msg">AI: ${data.reply}</div>`;
-                chatBox.scrollTop = chatBox.scrollHeight;
-            }
+            // 显示在屏幕上
+            chatBox.innerHTML += `<div class="user-msg">我: ${msg}</div>`;
+            input.value = ""; 
+            chatBox.scrollTop = chatBox.scrollHeight;
+
+            // 3. 发送给后端（看这里！body 里加上了 history！）
+            const response = await fetch("/chat", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ 
+                    message: msg, 
+                    history: chatHistory // 👈 就是这个！把历史记录一起发过去
+                })
+            });
+
+            const data = await response.json();
+            
+            // 4. 拿到 AI 的回复后，也把它装进历史记录里
+            chatHistory.push({"role": "assistant", "content": data.reply});
+
+            // 显示在屏幕上
+            chatBox.innerHTML += `<div class="ai-msg">AI: ${data.reply}</div>`;
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
         </script>
     </body>
     </html>
