@@ -5,6 +5,8 @@ from fastapi import FastAPI, HTTPException
 import sqlite3
 from pydantic import BaseModel
 import requests
+import json
+from fastapi.responses import StreamingResponse
 load_dotenv()
 app = FastAPI()
 init_conn  = sqlite3.connect("school.db")
@@ -101,27 +103,46 @@ def chat_with_ai(request: ChatRequest):
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
-    messages = [
-        {"role": "system", "content": "你现在是个极其严厉的AI编程教练。说话一针见血，绝不废话。如果用户问低级问题，直接嘲讽他，然后再告诉他正确答案。"}
-    ]
+    messages = [{"role": "system", "content": "你现在是个极其严厉的AI编程教练。说话一针见血，绝不废话。如果用户问低级问题，直接嘲讽他，然后再告诉他正确答案。"}]
     messages.extend(request.history)
     messages.append({"role": "user", "content": request.message})
     data = {
         "model": "deepseek-chat",
-        "messages": messages
+        "messages": messages,
+        "stream": True
     }
-    response = requests.post(url, headers=headers, json=data)
-    if response.status_code == 200:
-        result = response.json()
-        ai_reply = result["choices"][0]["message"]["content"]
-        conn = sqlite3.connect("school.db")
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO chat_logs (user_msg, ai_msg) VALUES (?,?)", (request.message, ai_reply))
-        conn.commit()
-        conn.close()
-        return {"reply": ai_reply}
-    else:
-        return {"状态码": response.status_code, "化验单": response.text}
+
+    def generate():
+        full_ai_reply = ""
+
+        with requests.post(url, headers=headers, json=data, stream=True) as response:
+            for line in response.iter_lines():
+                if line:
+                    raw_text = line.decode('utf-8').strip()
+                    if raw_text.startswith("data: "):
+                        text = raw_text[6:]
+                        if text != "[DONE]":
+                            try:
+                                json_data = json.loads(text)
+                                choices = json_data.get("choices", [])
+                                if choices:
+                                    delta = choices[0].get("delta", {})
+                                    chunk = delta.get("content", "")
+                                    if chunk:
+                                        # 👈 2. 每吐出一个碎片，就拼接到完整回复里
+                                        full_ai_reply += chunk
+                                        yield chunk
+                            except Exception as e:
+                                print(f"\n❌ 解析崩溃：【{text}】")
+                                print(f"❌ 报错：{e}\n")
+        if full_ai_reply:
+            conn = sqlite3.connect("school.db")
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO chat_logs (user_msg, ai_msg) VALUES (?, ?)", (request.message, full_ai_reply))
+            conn.commit()
+            conn.close()
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
 @app.get("/chat_ui", response_class=HTMLResponse)
 def chat_ui():
     html_content = """
@@ -144,43 +165,59 @@ def chat_ui():
         <input type="text" id="msg-input" placeholder="输入你想说的话...">
         <button onclick="sendMessage()">发送</button>
 
-        <script>
-                    // 1. 在函数最外面建一个全局数组，用来存历史记录
-        let chatHistory = [];
+                <script>
+            // 1. 建个全局数组，当记忆库
+            let chatHistory = [];
 
-        async function sendMessage() {
-            const input = document.getElementById("msg-input");
-            const chatBox = document.getElementById("chat-box");
-            const msg = input.value;
-            if (!msg) return;
+            async function sendMessage() {
+                const input = document.getElementById("msg-input");
+                const chatBox = document.getElementById("chat-box");
+                const msg = input.value;
+                if (!msg) return;
 
-            // 2. 把你说的话，先装进历史记录里
-            chatHistory.push({"role": "user", "content": msg});
+                // 2. 把你发的话存进记忆库，并显示在屏幕上
+                chatHistory.push({"role": "user", "content": msg});
+                chatBox.innerHTML += `<div class="user-msg">我: ${msg}</div>`;
+                input.value = ""; 
+                chatBox.scrollTop = chatBox.scrollHeight;
 
-            // 显示在屏幕上
-            chatBox.innerHTML += `<div class="user-msg">我: ${msg}</div>`;
-            input.value = ""; 
-            chatBox.scrollTop = chatBox.scrollHeight;
+                // 3. 发送请求给后端
+                const response = await fetch("/chat", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ 
+                        message: msg, 
+                        history: chatHistory 
+                    })
+                });
 
-            // 3. 发送给后端（看这里！body 里加上了 history！）
-            const response = await fetch("/chat", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ 
-                    message: msg, 
-                    history: chatHistory // 👈 就是这个！把历史记录一起发过去
-                })
-            });
+                // 4. 建一个空的 AI 聊天气泡，先不打字
+                const aiMsgDiv = document.createElement("div");
+                aiMsgDiv.className = "ai-msg";
+                aiMsgDiv.innerText = "AI: ";
+                chatBox.appendChild(aiMsgDiv);
+                
+                // 5. 像吸管一样，接收流式数据
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder("utf-8");
+                let aiReply = ""; // 用来存最终完整的回复
 
-            const data = await response.json();
-            
-            // 4. 拿到 AI 的回复后，也把它装进历史记录里
-            chatHistory.push({"role": "assistant", "content": data.reply});
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    
+                    // 解码吐出来的字，拼接到总回复里
+                    const chunk = decoder.decode(value, { stream: true });
+                    aiReply += chunk;
+                    
+                    // 实时更新到网页上，这就产生了“打字机”效果
+                    aiMsgDiv.innerText = "AI: " + aiReply;
+                    chatBox.scrollTop = chatBox.scrollHeight;
+                }
 
-            // 显示在屏幕上
-            chatBox.innerHTML += `<div class="ai-msg">AI: ${data.reply}</div>`;
-            chatBox.scrollTop = chatBox.scrollHeight;
-        }
+                // 6. 全部接收完后，把 AI 的完整回复存进记忆库
+                chatHistory.push({"role": "assistant", "content": aiReply});
+            }
         </script>
     </body>
     </html>
