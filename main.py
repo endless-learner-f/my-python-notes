@@ -1,12 +1,14 @@
 from fastapi.responses import HTMLResponse
 import os
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 import sqlite3
 from pydantic import BaseModel
 import requests
 import json
 from fastapi.responses import StreamingResponse
+import jwt
+import datetime
 load_dotenv()
 app = FastAPI()
 init_conn = sqlite3.connect("school.db")
@@ -53,6 +55,7 @@ def get_students(min_age: int = 0):
 class Student(BaseModel):
     name: str
     age: int
+
 @app.post("/add_student")
 def add_student(student: Student):
     conn =  sqlite3.connect("school.db")
@@ -94,14 +97,14 @@ class Users(BaseModel):
     password: str
 @app.post("/register")
 def make_count(user:Users):
-    init_conn = sqlite3.connect("school.db")
-    init_cursor = init_conn.cursor()
-    init_cursor.execute(
+    conn = sqlite3.connect("school.db")
+    cursor = init_conn.cursor()
+    cursor.execute(
         "INSERT INTO users (username, password) VALUES (?,?)",
         (user.username, user.password)
     )
-    init_conn.commit()
-    init_conn.close()
+    conn.commit()
+    conn.close()
     return {"message": "注册成功"}
 
 @app.post("/login")
@@ -117,7 +120,27 @@ def login(user: Users):
     if result is None:
         raise HTTPException(status_code=401, detail="账号和密码错误")
     else:
-        return{"message":"登录成功"}
+        payload = {
+            "username": user.username,
+            "exp": datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=24)
+        }
+        token = jwt.encode(payload,  "my_secret_key", algorithm="HS256")
+        return {"message": "登录成功", "token": token}
+
+@app.get("/my_secret_data")
+def get_secret_data(authorization: str =  Header(None)):
+    if authorization is None:
+        raise HTTPException(status_code=401, detail="缺少 Token，请先登录！")
+    try:
+        token = authorization.replace("Bearer ","")
+        decoded_data = jwt.decode(token, "my_secret_key", algorithms=["HS256"])
+        username = decoded_data.get("username")
+        return {"message": f"欢迎回来，尊贵的 {username}, 这是你的绝密数据！"}
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token 已过期，请重新登录！")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="无效的 Token，你是黑客吗？")
+
 
 @app.get("/students/{student_id}")
 def get_one_student(student_id: int):
@@ -135,7 +158,22 @@ class ChatRequest(BaseModel):
     history: list = []
     persona: str = "你现在是一个极其严厉的AI编程教练。"
 @app.post("/chat")
-def chat_with_ai(request: ChatRequest):
+def chat_with_ai(request: ChatRequest, authorization: str = Header(None)):
+    if authorization is None:
+        raise HTTPException(status_code=401, detail="请先登录才能聊天！")
+    try:
+        token = authorization.split(" ")[-1]
+
+        print(f"👉 收到的 Token: {token[:20]}...")
+
+        jwt.decode(token, "my_secret_key", algorithms=["HS256"])
+
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="登录已过期，请重新登录！")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="无效的 Token！")
+    except Exception:
+        raise HTTPException(status_code=401, detail="未知的 Token 错误！")
     api_key = os.getenv("DEEPSEEK_API_KEY")
     url = "https://api.deepseek.com/chat/completions"
     headers = {
@@ -182,6 +220,7 @@ def chat_with_ai(request: ChatRequest):
             conn.close()
     return StreamingResponse(generate(), media_type="text/event-stream")
 
+
 @app.get("/chat_ui", response_class=HTMLResponse)
 def chat_ui():
     html_content = """
@@ -189,6 +228,8 @@ def chat_ui():
     <html>
     <head>
         <title>我的专属 AI 助手</title>
+        <!-- 引入 Markdown 渲染库 -->
+        <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
         <style>
             body { font-family: sans-serif; max-width: 500px; margin: 50px auto; background: #f0f2f5; }
             #chat-box { background: white; padding: 20px; border-radius: 10px; height: 400px; overflow-y: scroll; margin-bottom: 10px; }
@@ -196,78 +237,133 @@ def chat_ui():
             .ai-msg { text-align: left; color: green; margin: 10px 0; }
             input { width: 80%; padding: 10px; }
             button { padding: 10px; cursor: pointer; }
-            <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
         </style>
     </head>
     <body>
         <h2>我的专属 AI 助手</h2>
-        <div id="chat-box"></div>
-                <!-- 👇 加这一行下拉框 -->
-        <select id="persona-select" style="margin-bottom: 10px; padding: 5px; width: 100%;">
-            <option value="你现在是一个极其严厉的AI编程教练。说话一针见血，绝不废话。如果用户问低级问题，直接嘲讽他。">暴躁老哥</option>
-            <option value="你现在是一个温柔可爱的AI助手。">温柔助手</option>
-        </select>
 
-        <input type="text" id="msg-input" placeholder="输入你想说的话...">
-        <button onclick="sendMessage()">发送</button>
-        <button onclick="clearChat()" style="background: red; color: white; margin-left: 5px;">清空</button>
+        <!-- 登录面板 -->
+        <div id="login-panel" style="margin-bottom: 20px; text-align: center;">
+            <input type="text" id="username" placeholder="请输入账号" style="padding: 10px; margin: 5px;">
+            <input type="password" id="password" placeholder="请输入密码" style="padding: 10px; margin: 5px;">
+            <button onclick="login()" style="padding: 10px; background: blue; color: white;">登录</button>
+        </div>
 
-                <script>
-            // 1. 建个全局数组，当记忆库
+        <!-- 聊天面板（默认隐藏） -->
+        <div id="chat-panel" style="display: none;">
+            <button onclick="logout()" style="background: gray; color: white; margin-bottom: 10px;">退出登录</button>
+            <select id="persona-select" style="margin-bottom: 10px; padding: 5px; width: 100%;">
+                <option value="你现在是一个极其严厉的AI编程教练。">暴躁老哥</option>
+                <option value="你现在是一个温柔可爱的AI助手。">温柔助手</option>
+            </select>
+
+            <div id="chat-box"></div>
+
+            <input type="text" id="msg-input" placeholder="输入你想说的话...">
+            <button onclick="sendMessage()">发送</button>
+            <button onclick="clearChat()" style="background: red; color: white;">清空</button>
+        </div>
+
+        <script>
             let chatHistory = [];
-            function clearChat() {
-    chatHistory = []; // 清空记忆数组
-    document.getElementById("chat-box").innerHTML = ""; // 清空屏幕上的气泡
-}
 
+            // 页面加载时，检查本地有没有 Token
+            window.onload = function() {
+                const token = localStorage.getItem("token");
+                if (token) {
+                    document.getElementById("login-panel").style.display = "none";
+                    document.getElementById("chat-panel").style.display = "block";
+                }
+            };
+
+            // 登录功能
+            async function login() {
+                const u = document.getElementById("username").value;
+                const p = document.getElementById("password").value;
+                const res = await fetch("/login", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ username: u, password: p })
+                });
+
+                if (res.ok) {
+                    const data = await res.json();
+                    localStorage.setItem("token", data.token); 
+                    alert("登录成功！");
+                    document.getElementById("login-panel").style.display = "none";
+                    document.getElementById("chat-panel").style.display = "block";
+                } else {
+                    alert("账号或密码错误！");
+                }
+            }
+
+            // 退出登录功能
+            function logout() {
+                localStorage.removeItem("token");
+                location.reload(); // 刷新页面
+            }
+
+            // 清空聊天
+            function clearChat() {
+                chatHistory = [];
+                document.getElementById("chat-box").innerHTML = "";
+            }
+
+            // 发送消息（流式打字机）
             async function sendMessage() {
                 const input = document.getElementById("msg-input");
                 const chatBox = document.getElementById("chat-box");
                 const msg = input.value;
                 if (!msg) return;
 
-                // 2. 把你发的话存进记忆库，并显示在屏幕上
                 chatHistory.push({"role": "user", "content": msg});
                 chatBox.innerHTML += `<div class="user-msg">我: ${msg}</div>`;
                 input.value = ""; 
                 chatBox.scrollTop = chatBox.scrollHeight;
 
-                // 3. 发送请求给后端
+                const token = localStorage.getItem("token");
+
                 const response = await fetch("/chat", {
                     method: "POST",
-                    headers: { "Content-Type": "application/json" },
+                    headers: { 
+                        "Content-Type": "application/json",
+                        "Authorization": `Bearer ${token}` // 带上 Token
+                    },
                     body: JSON.stringify({ 
                         message: msg, 
                         history: chatHistory,
-                        persona: document.getElementById("persona-select").value
+                        persona: document.getElementById("persona-select").value 
                     })
                 });
 
-                // 4. 建一个空的 AI 聊天气泡，先不打字
+                if (response.status === 401) {
+                    alert("登录已过期或无效，请重新登录！");
+                    logout();
+                    return;
+                }
+
                 const aiMsgDiv = document.createElement("div");
                 aiMsgDiv.className = "ai-msg";
                 aiMsgDiv.innerText = "AI: ";
                 chatBox.appendChild(aiMsgDiv);
-                
-                // 5. 像吸管一样，接收流式数据
+
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder("utf-8");
-                let aiReply = ""; // 用来存最终完整的回复
+                let aiReply = ""; 
 
                 while (true) {
                     const { done, value } = await reader.read();
                     if (done) break;
-                    
-                    // 解码吐出来的字，拼接到总回复里
+
                     const chunk = decoder.decode(value, { stream: true });
                     aiReply += chunk;
-                    
-                    // 实时更新到网页上，这就产生了“打字机”效果
-                    aiMsgDiv.innerHTML = "AI: " + marked.parse(aiReply);
+
+                    aiMsgDiv.innerText = "AI: " + aiReply; // 流式过程纯文本
                     chatBox.scrollTop = chatBox.scrollHeight;
                 }
 
-                // 6. 全部接收完后，把 AI 的完整回复存进记忆库
+                // 接收完毕后，用 marked 渲染成漂亮的 Markdown
+                aiMsgDiv.innerHTML = "AI: " + marked.parse(aiReply);
                 chatHistory.push({"role": "assistant", "content": aiReply});
             }
         </script>
