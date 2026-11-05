@@ -9,6 +9,14 @@ import json
 from fastapi.responses import StreamingResponse
 load_dotenv()
 app = FastAPI()
+init_conn = sqlite3.connect("school.db")
+init_cursor = init_conn.cursor()
+init_cursor.execute('''
+CREATE TABLE IF NOT EXISTS users(
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    username VARCHAR(50) NOT NULL UNIQUE,
+    password VARCHAR(100) NOT NULL)
+    ''')
 init_conn  = sqlite3.connect("school.db")
 init_cursor = init_conn.cursor()
 init_cursor.execute("""
@@ -81,6 +89,36 @@ def update_student(student_id: int, student: Student):
     conn.close()
     return {"message": f"成功更新学号为 {student_id} 的学生信息"}
 
+class Users(BaseModel):
+    username: str
+    password: str
+@app.post("/register")
+def make_count(user:Users):
+    init_conn = sqlite3.connect("school.db")
+    init_cursor = init_conn.cursor()
+    init_cursor.execute(
+        "INSERT INTO users (username, password) VALUES (?,?)",
+        (user.username, user.password)
+    )
+    init_conn.commit()
+    init_conn.close()
+    return {"message": "注册成功"}
+
+@app.post("/login")
+def login(user: Users):
+    conn = sqlite3.connect("school.db")
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT * FROM users WHERE username = ? AND password = ?",
+        (user.username, user.password)
+    )
+    result = cursor.fetchone()
+    conn.close()
+    if result is None:
+        raise HTTPException(status_code=401, detail="账号和密码错误")
+    else:
+        return{"message":"登录成功"}
+
 @app.get("/students/{student_id}")
 def get_one_student(student_id: int):
     conn = sqlite3.connect("school.db")
@@ -95,6 +133,7 @@ def get_one_student(student_id: int):
 class ChatRequest(BaseModel):
     message: str
     history: list = []
+    persona: str = "你现在是一个极其严厉的AI编程教练。"
 @app.post("/chat")
 def chat_with_ai(request: ChatRequest):
     api_key = os.getenv("DEEPSEEK_API_KEY")
@@ -103,7 +142,7 @@ def chat_with_ai(request: ChatRequest):
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
-    messages = [{"role": "system", "content": "你现在是个极其严厉的AI编程教练。说话一针见血，绝不废话。如果用户问低级问题，直接嘲讽他，然后再告诉他正确答案。"}]
+    messages = [{"role": "system", "content": request.persona}]
     messages.extend(request.history)
     messages.append({"role": "user", "content": request.message})
     data = {
@@ -157,17 +196,29 @@ def chat_ui():
             .ai-msg { text-align: left; color: green; margin: 10px 0; }
             input { width: 80%; padding: 10px; }
             button { padding: 10px; cursor: pointer; }
+            <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
         </style>
     </head>
     <body>
         <h2>我的专属 AI 助手</h2>
         <div id="chat-box"></div>
+                <!-- 👇 加这一行下拉框 -->
+        <select id="persona-select" style="margin-bottom: 10px; padding: 5px; width: 100%;">
+            <option value="你现在是一个极其严厉的AI编程教练。说话一针见血，绝不废话。如果用户问低级问题，直接嘲讽他。">暴躁老哥</option>
+            <option value="你现在是一个温柔可爱的AI助手。">温柔助手</option>
+        </select>
+
         <input type="text" id="msg-input" placeholder="输入你想说的话...">
         <button onclick="sendMessage()">发送</button>
+        <button onclick="clearChat()" style="background: red; color: white; margin-left: 5px;">清空</button>
 
                 <script>
             // 1. 建个全局数组，当记忆库
             let chatHistory = [];
+            function clearChat() {
+    chatHistory = []; // 清空记忆数组
+    document.getElementById("chat-box").innerHTML = ""; // 清空屏幕上的气泡
+}
 
             async function sendMessage() {
                 const input = document.getElementById("msg-input");
@@ -187,7 +238,8 @@ def chat_ui():
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ 
                         message: msg, 
-                        history: chatHistory 
+                        history: chatHistory,
+                        persona: document.getElementById("persona-select").value
                     })
                 });
 
@@ -211,7 +263,7 @@ def chat_ui():
                     aiReply += chunk;
                     
                     // 实时更新到网页上，这就产生了“打字机”效果
-                    aiMsgDiv.innerText = "AI: " + aiReply;
+                    aiMsgDiv.innerHTML = "AI: " + marked.parse(aiReply);
                     chatBox.scrollTop = chatBox.scrollHeight;
                 }
 
