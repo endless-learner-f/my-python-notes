@@ -19,8 +19,6 @@ CREATE TABLE IF NOT EXISTS users(
     username VARCHAR(50) NOT NULL UNIQUE,
     password VARCHAR(100) NOT NULL)
     ''')
-init_conn  = sqlite3.connect("school.db")
-init_cursor = init_conn.cursor()
 init_cursor.execute("""
     CREATE TABLE IF NOT EXISTS chat_logs(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -98,7 +96,7 @@ class Users(BaseModel):
 @app.post("/register")
 def make_count(user:Users):
     conn = sqlite3.connect("school.db")
-    cursor = init_conn.cursor()
+    cursor = conn.cursor()
     cursor.execute(
         "INSERT INTO users (username, password) VALUES (?,?)",
         (user.username, user.password)
@@ -132,7 +130,7 @@ def get_secret_data(authorization: str =  Header(None)):
     if authorization is None:
         raise HTTPException(status_code=401, detail="缺少 Token，请先登录！")
     try:
-        token = authorization.replace("Bearer ","")
+        token = authorization.split(" ")[-1]
         decoded_data = jwt.decode(token, "my_secret_key", algorithms=["HS256"])
         username = decoded_data.get("username")
         return {"message": f"欢迎回来，尊贵的 {username}, 这是你的绝密数据！"}
