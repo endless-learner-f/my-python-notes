@@ -1,0 +1,169 @@
+ <!DOCTYPE html>
+    <html lang="zh-CN">
+    <head>
+        <title>我的专属 AI 助手</title>
+        <!-- 引入 Markdown 渲染库 -->
+        <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+        <style>
+            body { font-family: sans-serif; max-width: 500px; margin: 50px auto; background: #f0f2f5; }
+            #chat-box { background: white; padding: 20px; border-radius: 10px; height: 400px; overflow-y: scroll; margin-bottom: 10px; }
+            .user-msg { text-align: right; color: blue; margin: 10px 0; }
+            .ai-msg { text-align: left; color: green; margin: 10px 0; }
+            input { width: 80%; padding: 10px; }
+            button { padding: 10px; cursor: pointer; }
+        </style>
+    </head>
+    <body>
+        <h2>我的专属 AI 助手</h2>
+
+        <!-- 登录面板 -->
+        <div id="login-panel" style="margin-bottom: 20px; text-align: center;">
+            <input type="text" id="username" placeholder="请输入账号" style="padding: 10px; margin: 5px;">
+            <input type="password" id="password" placeholder="请输入密码" style="padding: 10px; margin: 5px;">
+            <button onclick="login()" style="padding: 10px; background: blue; color: white;">登录</button>
+        </div>
+
+        <!-- 聊天面板（默认隐藏） -->
+        <div id="chat-panel" style="display: none;">
+            <button onclick="logout()" style="background: gray; color: white; margin-bottom: 10px;">退出登录</button>
+            <select id="persona-select" style="margin-bottom: 10px; padding: 5px; width: 100%;">
+                <option value="你现在是一个极其严厉的AI编程教练。">暴躁老哥</option>
+                <option value="你现在是一个温柔可爱的AI助手。">温柔助手</option>
+            </select>
+
+            <div id="chat-box"></div>
+
+            <input type="text" id="msg-input" placeholder="输入你想说的话...">
+            <button onclick="sendMessage()">发送</button>
+            <button onclick="clearChat()" style="background: red; color: white;">清空</button>
+        </div>
+
+            <script>
+        let chatHistory = [];
+
+        // 页面加载时，检查 Token 和 历史记忆
+        window.onload = function() {
+            const token = localStorage.getItem("token");
+            if (token) {
+                document.getElementById("login-panel").style.display = "none";
+                document.getElementById("chat-panel").style.display = "block";
+            }
+
+            const savedHistory = localStorage.getItem("chatHistory");
+            if (savedHistory) {
+                chatHistory = JSON.parse(savedHistory);
+                const chatBox = document.getElementById("chat-box");
+
+                chatHistory.forEach(item => {
+                    if (item.role === "user") {
+                        chatBox.innerHTML += `<div class="user-msg">我: ${item.content}</div>`;
+                    } else if (item.role === "assistant") {
+                        // AI的话用 marked 解析，保证代码块和加粗正常
+                        chatBox.innerHTML += `<div class="ai-msg">AI: ${marked.parse(item.content)}</div>`;
+                    }
+                });
+                chatBox.scrollTop = chatBox.scrollHeight;
+            }
+        };
+
+        // 登录功能
+        async function login() {
+            const u = document.getElementById("username").value;
+            const p = document.getElementById("password").value;
+            const res = await fetch("/login", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ username: u, password: p })
+            });
+
+            if (res.ok) {
+                const data = await res.json();
+                localStorage.setItem("token", data.token);
+                alert("登录成功！");
+                document.getElementById("login-panel").style.display = "none";
+                document.getElementById("chat-panel").style.display = "block";
+            } else {
+                alert("账号或密码错误！");
+            }
+        }
+
+        // 退出登录
+        function logout() {
+            localStorage.removeItem("token");
+            // 退出时顺便把网页上的聊天记录也清空（但保留本地缓存，或者根据需求全删）
+            location.reload();
+        }
+
+        // 清空聊天
+        function clearChat() {
+            chatHistory = [];
+            document.getElementById("chat-box").innerHTML = "";
+            localStorage.removeItem("chatHistory"); // 把本地记忆也删掉
+        }
+
+        // 发送消息（流式打字机）
+        async function sendMessage() {
+            const input = document.getElementById("msg-input");
+            const chatBox = document.getElementById("chat-box");
+            const msg = input.value;
+            if (!msg) return;
+
+            chatHistory.push({"role": "user", "content": msg});
+            // 用户发完立刻存一次本地
+            localStorage.setItem("chatHistory", JSON.stringify(chatHistory));
+
+            chatBox.innerHTML += `<div class="user-msg">我: ${msg}</div>`;
+            input.value = "";
+            chatBox.scrollTop = chatBox.scrollHeight;
+
+            const token = localStorage.getItem("token");
+
+            const response = await fetch("/chat", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${token}`
+                },
+                body: JSON.stringify({
+                    message: msg,
+                    history: chatHistory.slice(0, -1), // 截掉刚存进去的这句，防止重复
+                    persona: document.getElementById("persona-select").value
+                })
+            });
+
+            if (response.status === 401) {
+                alert("登录已过期或无效，请重新登录！");
+                logout();
+                return;
+            }
+
+            const aiMsgDiv = document.createElement("div");
+            aiMsgDiv.className = "ai-msg";
+            aiMsgDiv.innerText = "AI: ";
+            chatBox.appendChild(aiMsgDiv);
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder("utf-8");
+            let aiReply = "";
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                const chunk = decoder.decode(value, { stream: true });
+                aiReply += chunk;
+
+                aiMsgDiv.innerText = "AI: " + aiReply;
+                chatBox.scrollTop = chatBox.scrollHeight;
+            }
+
+            // 接收完毕，渲染 Markdown
+            aiMsgDiv.innerHTML = "AI: " + marked.parse(aiReply);
+
+            // 把 AI 的回复存进数组，并且更新本地缓存
+            chatHistory.push({"role": "assistant", "content": aiReply});
+            localStorage.setItem("chatHistory", JSON.stringify(chatHistory));
+        }
+    </script>
+    </body>
+    </html>

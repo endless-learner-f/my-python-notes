@@ -1,3 +1,5 @@
+from fastapi.responses import HTMLResponse, StreamingResponse, FileResponse
+import bcrypt
 from fastapi.responses import HTMLResponse
 import os
 from dotenv import load_dotenv
@@ -97,33 +99,39 @@ class Users(BaseModel):
 def make_count(user:Users):
     conn = sqlite3.connect("school.db")
     cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO users (username, password) VALUES (?,?)",
-        (user.username, user.password)
-    )
-    conn.commit()
-    conn.close()
-    return {"message": "注册成功"}
+    hashed_password = bcrypt.hashpw(user.password.encode('utf-8'), bcrypt.gensalt())
+    try:
+        cursor.execute(
+            "INSERT INTO users (username, password) VALUES (?,?)",
+            (user.username, hashed_password.decode('utf-8'))
+        )
+        conn.commit()
+        return {"message": "注册成功"}
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=400, detail="该用户名已被注册！")
+    finally:
+        conn.close()
+
+
 
 @app.post("/login")
 def login(user: Users):
     conn = sqlite3.connect("school.db")
     cursor = conn.cursor()
-    cursor.execute(
-        "SELECT * FROM users WHERE username = ? AND password = ?",
-        (user.username, user.password)
-    )
+    cursor.execute("SELECT * FROM users WHERE username = ?", (user.username,))
     result = cursor.fetchone()
     conn.close()
     if result is None:
-        raise HTTPException(status_code=401, detail="账号和密码错误")
-    else:
-        payload = {
-            "username": user.username,
-            "exp": datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=24)
-        }
-        token = jwt.encode(payload,  "my_secret_key", algorithm="HS256")
-        return {"message": "登录成功", "token": token}
+        raise HTTPException(status_code=401, detail="账号不存在")
+    db_hashed_password = result[2]
+    if not bcrypt.checkpw(user.password.encode('utf-8'), db_hashed_password.encode('utf-8')):
+        raise HTTPException(status_code=401, detail="密码错误！")
+    payload = {
+        "username":user.username,
+        "exp": datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=24)
+    }
+    token = jwt.encode(payload, "my_secret_key", algorithm="HS256")
+    return {"message": "登录成功", "token": token}
 
 @app.get("/my_secret_data")
 def get_secret_data(authorization: str =  Header(None)):
@@ -221,151 +229,4 @@ def chat_with_ai(request: ChatRequest, authorization: str = Header(None)):
 
 @app.get("/chat_ui", response_class=HTMLResponse)
 def chat_ui():
-    html_content = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>我的专属 AI 助手</title>
-        <!-- 引入 Markdown 渲染库 -->
-        <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-        <style>
-            body { font-family: sans-serif; max-width: 500px; margin: 50px auto; background: #f0f2f5; }
-            #chat-box { background: white; padding: 20px; border-radius: 10px; height: 400px; overflow-y: scroll; margin-bottom: 10px; }
-            .user-msg { text-align: right; color: blue; margin: 10px 0; }
-            .ai-msg { text-align: left; color: green; margin: 10px 0; }
-            input { width: 80%; padding: 10px; }
-            button { padding: 10px; cursor: pointer; }
-        </style>
-    </head>
-    <body>
-        <h2>我的专属 AI 助手</h2>
-
-        <!-- 登录面板 -->
-        <div id="login-panel" style="margin-bottom: 20px; text-align: center;">
-            <input type="text" id="username" placeholder="请输入账号" style="padding: 10px; margin: 5px;">
-            <input type="password" id="password" placeholder="请输入密码" style="padding: 10px; margin: 5px;">
-            <button onclick="login()" style="padding: 10px; background: blue; color: white;">登录</button>
-        </div>
-
-        <!-- 聊天面板（默认隐藏） -->
-        <div id="chat-panel" style="display: none;">
-            <button onclick="logout()" style="background: gray; color: white; margin-bottom: 10px;">退出登录</button>
-            <select id="persona-select" style="margin-bottom: 10px; padding: 5px; width: 100%;">
-                <option value="你现在是一个极其严厉的AI编程教练。">暴躁老哥</option>
-                <option value="你现在是一个温柔可爱的AI助手。">温柔助手</option>
-            </select>
-
-            <div id="chat-box"></div>
-
-            <input type="text" id="msg-input" placeholder="输入你想说的话...">
-            <button onclick="sendMessage()">发送</button>
-            <button onclick="clearChat()" style="background: red; color: white;">清空</button>
-        </div>
-
-        <script>
-            let chatHistory = [];
-
-            // 页面加载时，检查本地有没有 Token
-            window.onload = function() {
-                const token = localStorage.getItem("token");
-                if (token) {
-                    document.getElementById("login-panel").style.display = "none";
-                    document.getElementById("chat-panel").style.display = "block";
-                }
-            };
-
-            // 登录功能
-            async function login() {
-                const u = document.getElementById("username").value;
-                const p = document.getElementById("password").value;
-                const res = await fetch("/login", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ username: u, password: p })
-                });
-
-                if (res.ok) {
-                    const data = await res.json();
-                    localStorage.setItem("token", data.token); 
-                    alert("登录成功！");
-                    document.getElementById("login-panel").style.display = "none";
-                    document.getElementById("chat-panel").style.display = "block";
-                } else {
-                    alert("账号或密码错误！");
-                }
-            }
-
-            // 退出登录功能
-            function logout() {
-                localStorage.removeItem("token");
-                location.reload(); // 刷新页面
-            }
-
-            // 清空聊天
-            function clearChat() {
-                chatHistory = [];
-                document.getElementById("chat-box").innerHTML = "";
-            }
-
-            // 发送消息（流式打字机）
-            async function sendMessage() {
-                const input = document.getElementById("msg-input");
-                const chatBox = document.getElementById("chat-box");
-                const msg = input.value;
-                if (!msg) return;
-
-                chatHistory.push({"role": "user", "content": msg});
-                chatBox.innerHTML += `<div class="user-msg">我: ${msg}</div>`;
-                input.value = ""; 
-                chatBox.scrollTop = chatBox.scrollHeight;
-
-                const token = localStorage.getItem("token");
-
-                const response = await fetch("/chat", {
-                    method: "POST",
-                    headers: { 
-                        "Content-Type": "application/json",
-                        "Authorization": `Bearer ${token}` // 带上 Token
-                    },
-                    body: JSON.stringify({ 
-                        message: msg, 
-                        history: chatHistory,
-                        persona: document.getElementById("persona-select").value 
-                    })
-                });
-
-                if (response.status === 401) {
-                    alert("登录已过期或无效，请重新登录！");
-                    logout();
-                    return;
-                }
-
-                const aiMsgDiv = document.createElement("div");
-                aiMsgDiv.className = "ai-msg";
-                aiMsgDiv.innerText = "AI: ";
-                chatBox.appendChild(aiMsgDiv);
-
-                const reader = response.body.getReader();
-                const decoder = new TextDecoder("utf-8");
-                let aiReply = ""; 
-
-                while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-
-                    const chunk = decoder.decode(value, { stream: true });
-                    aiReply += chunk;
-
-                    aiMsgDiv.innerText = "AI: " + aiReply; // 流式过程纯文本
-                    chatBox.scrollTop = chatBox.scrollHeight;
-                }
-
-                // 接收完毕后，用 marked 渲染成漂亮的 Markdown
-                aiMsgDiv.innerHTML = "AI: " + marked.parse(aiReply);
-                chatHistory.push({"role": "assistant", "content": aiReply});
-            }
-        </script>
-    </body>
-    </html>
-    """
-    return html_content
+    return FileResponse("index.html")
